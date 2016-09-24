@@ -11,11 +11,12 @@ const KEYSZ: usize = 16;
 const INITIAL_SIZE: usize = 128;
 
 
-type HashKey = Box<[u8; 16]>;
+type RawKey = [u8; 16];
+type HashKey = Box<RawKey>;
 
 #[derive(Debug)]
 struct HashSlot {
-    key: atomic::AtomicPtr<HashKey>,
+    key: atomic::AtomicPtr<RawKey>,
     count: atomic::AtomicUsize,
 }
 
@@ -84,17 +85,17 @@ impl Counter {
         }
     }
 
-
     unsafe fn unsafe_get(&self, key: HashKey) -> usize {
         let size = self.size;
         let mut index = djb2_hash(&key) % size;
+        let raw_key = Box::into_raw(key);
         loop {
             let slot = &self.slots[index];
             let other_key = slot.key.load(Ordering::Relaxed);
             if other_key.is_null() {
                 return 0;
             }
-            else if *other_key == key {
+            else if *other_key == *raw_key{
                 return slot.count.load(Ordering::Relaxed);
             }
             index = (index + 1) % size;
@@ -104,17 +105,18 @@ impl Counter {
     unsafe fn unsafe_incr(&mut self, mut key: HashKey, count: usize) -> usize {
         let size = self.size;
         let mut index = djb2_hash(&key) % size;
+        let raw_key = Box::into_raw(key);
         loop {
             let slot = &self.slots[index];
             let other_key = slot.key.load(Ordering::Relaxed);
             if other_key.is_null() {
                 let res = slot.key.compare_exchange(other_key,
-                                                    &mut key,
+                                                    raw_key,
                                                     Ordering::Relaxed,
                                                     Ordering::Relaxed);
                 let status = match res {
-                    Ok(v) => v.is_null() || *v == key,
-                    Err(v) => v.is_null() || *v == key,
+                    Ok(v) => v.is_null() || *v == *raw_key,
+                    Err(v) => v.is_null() || *v == *raw_key,
                 };
                 if status {
                     self.used.fetch_add(1, Ordering::Relaxed);
@@ -123,7 +125,7 @@ impl Counter {
                     return added
                 }
             }
-            else if *other_key == key {
+            else if *other_key == *raw_key {
                 return slot.count.fetch_add(count, Ordering::Relaxed);
             }
             index = (index + 1) % size
