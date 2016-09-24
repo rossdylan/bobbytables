@@ -1,0 +1,6 @@
+[package]
+name = "bobbytables"
+version = "0.1.0"
+authors = ["Ross Delinger <rossdylan@fastmail.com>"]
+
+[dependencies]
