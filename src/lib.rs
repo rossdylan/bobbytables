@@ -10,6 +10,7 @@ use std::ptr;
 
 const KEY_SIZE: usize = 16;
 const INITIAL_SIZE: usize = 128;
+const DJB2_START: usize = 5318;
 
 
 type HashKey = [u8; KEY_SIZE];
@@ -41,13 +42,11 @@ pub struct Counter {
 /// An implementation of the djb2 hash using rust iterators over the contents
 /// of the HashKey array.
 pub fn djb2_hash(key: &HashKey) -> usize {
-    let start: usize = 5381;
-    key.into_iter().take_while(|c| { **c != 0 }).fold(start, |hash, c| {
+    key.into_iter().take_while(|c| { **c != 0 }).fold(DJB2_START, |hash, c| {
         (hash * 33) ^ (*c as usize)})
 }
 
 /// A small inlined helper function that checks if a given character is ascii
-#[inline]
 fn is_ascii(c: &u8) -> bool {
     return (*c > 47 && *c < 58) || (*c > 64 && *c < 91) || (*c > 96 && *c < 123);
 }
@@ -76,7 +75,7 @@ impl HashSlot {
 }
 
 impl InnerCounter {
-    /// Create a new InnerCoutner. Sets up all the top level atomic values for
+    /// Create a new InnerCounter. Sets up all the top level atomic values for
     /// keeping track of global hashmap state.
     pub fn new() -> InnerCounter {
         let mut slots: Vec<HashSlot> = Vec::with_capacity(INITIAL_SIZE);
@@ -128,8 +127,9 @@ impl InnerCounter {
     pub unsafe fn unsafe_incr(&mut self, key: HashKey, count: usize) -> usize {
         let size = self.size;
         let mut index = djb2_hash(&key) % size;
+        let mut slot: &HashSlot;
         loop {
-            let slot = &self.slots[index];
+            slot = &self.slots[index];
             let other_key = slot.key.load(Ordering::Relaxed);
             if other_key.is_null() {
                 let boxed_key = Box::new(key);
@@ -137,22 +137,18 @@ impl InnerCounter {
                                                     Box::into_raw(boxed_key),
                                                     Ordering::Relaxed,
                                                     Ordering::Relaxed);
-                let status = match res {
-                    Ok(v) => v.is_null() || *v == key,
-                    Err(v) => v.is_null() || *v == key,
-                };
-                if status {
+                let ptr = res.unwrap_or_else(|v| { v });
+                if ptr.is_null() || *ptr == key {
                     self.used.fetch_add(1, Ordering::Relaxed);
-                    //TODO(rossdylan) handle resizing
-                    let added = slot.count.fetch_add(count, Ordering::Relaxed);
-                    return added
+                    break;
                 }
             }
             else if *other_key == key {
-                return slot.count.fetch_add(count, Ordering::Relaxed);
+                break;
             }
             index = (index + 1) % size
         }
+        return slot.count.fetch_add(count, Ordering::Relaxed);
     }
 }
 
@@ -246,6 +242,31 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_multi_key_increment() {
+        let counter = Counter::new();
+        let shared = Arc::new(counter);
+        let nthreads = 8;
+        let nincr = 10000;
+        let mut children = vec![];
+        for i in 0..nthreads {
+            let c = shared.clone();
+            let key = format!("thread_{}", i);
+            children.push(thread::spawn(move|| {
+                for _ in 0..nincr {
+                    c.incr(&key, 1);
+                }
+            }));
+        }
+        for t in children {
+            t.join();
+        }
+        for i in 0..nthreads {
+            let key = format!("thread_{}", i);
+            assert_eq!(shared.get(&key), nincr);
+        }
+    }
+
+    #[test]
     fn get() {
         let mut counter = Counter::new();
         let res = counter.incr("foo", 1);
@@ -282,5 +303,22 @@ mod tests {
         let mut counter = Counter::new();
         counter.incr("foo", 100);
         b.iter(|| counter.get("foo"))
+    }
+
+    #[bench]
+    fn bench_arc_incr(b: &mut Bencher) {
+        let mut counter = Counter::new();
+        let shared = Arc::new(counter);
+        let clone = shared.clone();
+        b.iter(|| clone.incr("foo", 1))
+    }
+
+    #[bench]
+    fn bench_arc_get(b: &mut Bencher) {
+        let mut counter = Counter::new();
+        let shared = Arc::new(counter);
+        let clone = shared.clone();
+        clone.incr("foo", 1);
+        b.iter(|| clone.get("foo"))
     }
 }
