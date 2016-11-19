@@ -207,14 +207,14 @@ mod tests {
 
     #[test]
     fn increment() {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         let res = counter.incr("foo", 1);
         assert_eq!(res, 0);
     }
 
     #[test]
     fn sequential_increment() {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         for _ in 0..100000 {
             counter.incr("foo", 1);
         }
@@ -236,7 +236,7 @@ mod tests {
             }));
         }
         for t in children {
-            t.join();
+            let _ = t.join();
         }
         assert_eq!(shared.get("foo"), nincr * nthreads);
     }
@@ -258,7 +258,7 @@ mod tests {
             }));
         }
         for t in children {
-            t.join();
+            let _ = t.join();
         }
         for i in 0..nthreads {
             let key = format!("thread_{}", i);
@@ -268,8 +268,8 @@ mod tests {
 
     #[test]
     fn get() {
-        let mut counter = Counter::new();
-        let res = counter.incr("foo", 1);
+        let counter = Counter::new();
+        let _ = counter.incr("foo", 1);
         let count = counter.get("foo");
         assert_eq!(count, 1);
     }
@@ -287,27 +287,27 @@ mod tests {
 
     #[bench]
     fn bench_incr(b: &mut Bencher) {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         b.iter(|| counter.incr("foo", 1))
     }
 
     #[bench]
     fn bench_existing_incr(b: &mut Bencher) {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         counter.incr("foo", 1);
         b.iter(|| counter.incr("foo", 1));
     }
 
     #[bench]
     fn bench_get(b: &mut Bencher) {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         counter.incr("foo", 100);
         b.iter(|| counter.get("foo"))
     }
 
     #[bench]
     fn bench_arc_incr(b: &mut Bencher) {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         let shared = Arc::new(counter);
         let clone = shared.clone();
         b.iter(|| clone.incr("foo", 1))
@@ -315,7 +315,7 @@ mod tests {
 
     #[bench]
     fn bench_arc_get(b: &mut Bencher) {
-        let mut counter = Counter::new();
+        let counter = Counter::new();
         let shared = Arc::new(counter);
         let clone = shared.clone();
         clone.incr("foo", 1);
