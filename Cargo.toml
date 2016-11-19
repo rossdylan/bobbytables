@@ -2,5 +2,9 @@
 name = "bobbytables"
 version = "0.1.0"
 authors = ["Ross Delinger <rossdylan@fastmail.com>"]
+description = "Atomic hashmap for incrementing integers"
+repository = "https://github.com/rossdylan/bobbytables"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
