@@ -1,4 +1,7 @@
 # BobbyTables
+
+[![Build Status](https://travis-ci.org/rossdylan/bobbytables.svg?branch=master)](https://travis-ci.org/rossdylan/bobbytables)
+
 Do you need to increment integers? Do you need to increment them quickly? Then
 this is the hashtable for you. Built on Patented "My Friend Rob Made it Up"
 technology.  BobbyTables uses rusts builtin support for atomics to provide a
