@@ -1,6 +1,6 @@
 # BobbyTables
 
-[![Build Status](https://travis-ci.org/rossdylan/bobbytables.svg?branch=master)](https://travis-ci.org/rossdylan/bobbytables)
+[![Build Status](https://travis-ci.org/rossdylan/bobbytables.svg?branch=master)](https://travis-ci.org/rossdylan/bobbytables) [![Crates.io Release](https://img.shields.io/crates/v/bobbytables.svg)]
 
 Do you need to increment integers? Do you need to increment them quickly? Then
 this is the hashtable for you. Built on Patented "My Friend Rob Made it Up"
