@@ -1,7 +1,6 @@
 #![feature(test)]
 extern crate test;
 
-
 use std::sync::atomic;
 use std::sync::atomic::Ordering;
 use std::cell::UnsafeCell;
@@ -39,11 +38,17 @@ pub struct Counter {
     inner: UnsafeCell<InnerCounter>
 }
 
+pub struct CounterIterator<'a> {
+    counter: &'a Counter,
+    index: usize,
+    size: usize,
+}
+
+
 /// An implementation of the djb2 hash using rust iterators over the contents
 /// of the HashKey array.
 pub fn djb2_hash(key: &HashKey) -> usize {
-    key.into_iter().take_while(|c| { **c != 0 }).fold(DJB2_START, |hash, c| {
-        (hash * 33) ^ (*c as usize)})
+    key.into_iter().take_while(|c| { **c != 0 }).fold(DJB2_START, |hash, c| { (hash * 33) ^ (*c as usize) })
 }
 
 /// A small inlined helper function that checks if a given character is ascii
@@ -62,6 +67,33 @@ pub fn clean_key(key: &str) -> HashKey {
     return cleaned;
 }
 
+impl<'a> IntoIterator for &'a Counter {
+    type Item = (String, usize);
+    type IntoIter = CounterIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CounterIterator { counter: self, index: 0 , size: self.size() }
+    }
+}
+
+impl<'a> Iterator for CounterIterator<'a> {
+    type Item = (String, usize);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.index < self.size {
+                match self.counter.get_index(self.index) {
+                    Some((key, val)) => {
+                        self.index += 1;
+                        return Some((key, val))
+                    },
+                    None => self.index += 1,
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+}
 
 impl HashSlot {
     /// Create a new HashSlot struct with the default values. The key is
@@ -90,6 +122,23 @@ impl InnerCounter {
             next: atomic::AtomicPtr::new(ptr::null_mut()),
         };
         return counter;
+    }
+
+    pub unsafe fn unsafe_get_index(&self, index: usize) -> Option<(HashKey, usize)> {
+        if index > 0 && index < self.size {
+            let slot = &self.slots[index];
+            let key = slot.key.load(Ordering::Relaxed);
+            if key.is_null() {
+                return None;
+            } else {
+                let value = slot.count.load(Ordering::Relaxed);
+                let key_copy: *mut HashKey = &mut [0; KEY_SIZE];
+                ptr::copy(key, key_copy, 1);
+                return Some((*key_copy, value));
+            }
+        } else {
+            return None;
+        }
     }
 
     /// Debug method for printing out the contents of a HashSlot struct
@@ -194,15 +243,31 @@ impl Counter {
             (*self.inner.get()).unsafe_get(clean_key(key))
         };
     }
+
+    pub fn get_index(&self, index: usize) -> Option<(String, usize)> {
+        return unsafe {
+            (*self.inner.get())
+                .unsafe_get_index(index)
+                .map(|(hk, c)| (std::str::from_utf8(&hk).unwrap().to_owned(), c))
+        };
+    }
+
+    pub fn size(&self) -> usize {
+        return unsafe {
+            (*self.inner.get()).size
+        };
+    }
 }
+
 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use test::Bencher;
     use std::thread;
     use std::sync::Arc;
+    use test::Bencher;
+    use super::*;
+
 
 
     #[test]
@@ -220,6 +285,68 @@ mod tests {
         }
         assert_eq!(counter.get("foo"), 100000);
     }
+
+    #[test]
+    fn sequential_iter() {
+        let counter = Counter::new();
+        for i in 0..20 {
+            let key = format!("key_{0}", i);
+            counter.incr(&key, 1);
+        }
+        for (key, val) in (&counter).into_iter() {
+            println!("k: {}, v: {}", key, val)
+        }
+    }
+
+    #[test]
+    fn concurrent_iter() {
+        let counter = Counter::new();
+        let shared = Arc::new(counter);
+        let nthreads = 8;
+        let c = shared.clone();
+        for i in 0..20 {
+            let key = format!("key_{0}", i);
+            c.incr(&key, 1);
+        }
+        let mut children = vec![];
+        for _ in 0..nthreads {
+            let c = shared.clone();
+            children.push(thread::spawn(move|| {
+                for (key, val) in (&c).into_iter() {
+                    assert_eq!(val, 1);
+                }
+            }));
+        }
+        for t in children {
+            let _ = t.join();
+        }
+    }
+
+    #[test]
+    fn concurrent_iter_and_incr() {
+        let counter = Counter::new();
+        let shared = Arc::new(counter);
+        let mut children = vec![];
+        let c1 = shared.clone();
+        children.push(thread::spawn(move|| {
+            for _ in 0..200 {
+                for (key, val) in (&c1).into_iter() {
+                    assert_eq!(key, "key_1")
+                }
+            }
+        }));
+        let c2 = shared.clone();
+        children.push(thread::spawn(move|| {
+            for _ in 0..10000 {
+                c2.incr("key_1", 1);
+            }
+        }));
+
+        for t in children {
+            let _ = t.join();
+        }
+    }
+
     #[test]
     fn concurrent_increment() {
         let counter = Counter::new();
@@ -304,6 +431,29 @@ mod tests {
         counter.incr("foo", 100);
         b.iter(|| counter.get("foo"))
     }
+
+    #[bench]
+    fn bench_into_iter(b: &mut Bencher) {
+        let counter = Counter::new();
+        let key = format!("key_{0}", 1);
+        counter.incr(&key, 1);
+        b.iter(|| (&counter).into_iter())
+    }
+
+    #[bench]
+    fn bench_iter(b: &mut Bencher) {
+        let counter = Counter::new();
+        let key = format!("key_{0}", 1);
+        counter.incr(&key, 1);
+        b.iter(|| {
+            for (key, val) in counter.into_iter() {
+                drop(key);
+                drop(val);
+            }
+        })
+
+    }
+
 
     #[bench]
     fn bench_arc_incr(b: &mut Bencher) {
