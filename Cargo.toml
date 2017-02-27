@@ -1,6 +1,6 @@
 [package]
 name = "bobbytables"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Ross Delinger <rossdylan@fastmail.com>"]
 description = "Atomic hashmap for incrementing integers"
 repository = "https://github.com/rossdylan/bobbytables"

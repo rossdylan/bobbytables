@@ -28,8 +28,6 @@ struct InnerCounter {
     size: usize,
     used: atomic::AtomicUsize,
     slots: Vec<HashSlot>,
-    prev: atomic::AtomicPtr<Counter>,
-    next: atomic:: AtomicPtr<Counter>,
 }
 
 /// The public Counter structure which contains the inner mutable state. This
@@ -118,8 +116,6 @@ impl InnerCounter {
             size: INITIAL_SIZE,
             used: atomic::AtomicUsize::new(0),
             slots: slots,
-            prev: atomic::AtomicPtr::new(ptr::null_mut()),
-            next: atomic::AtomicPtr::new(ptr::null_mut()),
         };
         return counter;
     }
@@ -138,19 +134,6 @@ impl InnerCounter {
             }
         } else {
             return None;
-        }
-    }
-
-    /// Debug method for printing out the contents of a HashSlot struct
-    unsafe fn print_slot(&self, index: usize) {
-        let slot = &self.slots[index];
-        let key = slot.key.load(Ordering::Relaxed);
-        println!("slot {}: {:?}", index, slot);
-        if key.is_null() {
-            println!("\t key=null")
-        }
-        else {
-            println!("\t key={:?}", *key);
         }
     }
 
