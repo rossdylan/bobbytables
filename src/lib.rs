@@ -49,7 +49,7 @@ pub fn djb2_hash(key: &HashKey) -> usize {
     key.into_iter().take_while(|c| { **c != 0 }).fold(DJB2_START, |hash, c| { (hash * 33) ^ (*c as usize) })
 }
 
-/// A small inlined helper function that checks if a given character is ascii
+/// A small inlinable helper function that checks if a given character is ascii
 fn is_ascii(c: &u8) -> bool {
     (*c > 47 && *c < 58) || (*c > 64 && *c < 91) || (*c > 96 && *c < 123)
 }
