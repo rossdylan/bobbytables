@@ -3,7 +3,6 @@ extern crate test;
 
 use std::sync::atomic;
 use std::sync::atomic::Ordering;
-use std::cell::UnsafeCell;
 use std::ptr;
 
 
@@ -33,7 +32,8 @@ struct InnerCounter {
 /// The public Counter structure which contains the inner mutable state. This
 /// allows us to put this straight into an Arc and safely share between threads
 pub struct Counter {
-    inner: UnsafeCell<InnerCounter>
+    inner: atomic::AtomicPtr<InnerCounter>,
+    prev: atomic::AtomicPtr<InnerCounter>,
 }
 
 pub struct CounterIterator<'a> {
@@ -50,6 +50,7 @@ pub fn djb2_hash(key: &HashKey) -> usize {
 }
 
 /// A small inlined helper function that checks if a given character is ascii
+#[inline(always)]
 fn is_ascii(c: &u8) -> bool {
     return (*c > 47 && *c < 58) || (*c > 64 && *c < 91) || (*c > 96 && *c < 123);
 }
@@ -107,13 +108,13 @@ impl HashSlot {
 impl InnerCounter {
     /// Create a new InnerCounter. Sets up all the top level atomic values for
     /// keeping track of global hashmap state.
-    pub fn new() -> InnerCounter {
-        let mut slots: Vec<HashSlot> = Vec::with_capacity(INITIAL_SIZE);
+    pub fn new(size: usize) -> InnerCounter {
+        let mut slots: Vec<HashSlot> = Vec::with_capacity(size);
         for _ in 0..INITIAL_SIZE {
             slots.push(HashSlot::new());
         }
         let counter: InnerCounter = InnerCounter {
-            size: INITIAL_SIZE,
+            size: size,
             used: atomic::AtomicUsize::new(0),
             slots: slots,
         };
@@ -207,7 +208,8 @@ impl Counter {
     /// counter implementation.
     pub fn new() -> Counter {
         Counter {
-            inner: UnsafeCell::new(InnerCounter::new())
+            inner: atomic::AtomicPtr::new(Box::into_raw(Box::new(InnerCounter::new(INITIAL_SIZE)))),
+            prev: atomic::AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -215,7 +217,7 @@ impl Counter {
     /// increment the given key.
     pub fn incr(&self, key: &str, count: usize) -> usize {
         return unsafe { 
-            (*self.inner.get()).unsafe_incr(clean_key(key), count)
+            (*self.inner.load(Ordering::Relaxed)).unsafe_incr(clean_key(key), count)
         };
     }
 
@@ -223,13 +225,13 @@ impl Counter {
     /// return the current counter value for the given key.
     pub fn get(&self, key: &str) -> usize {
         return unsafe {
-            (*self.inner.get()).unsafe_get(clean_key(key))
+            (*self.inner.load(Ordering::Relaxed)).unsafe_get(clean_key(key))
         };
     }
 
     pub fn get_index(&self, index: usize) -> Option<(String, usize)> {
         return unsafe {
-            (*self.inner.get())
+            (*self.inner.load(Ordering::Relaxed))
                 .unsafe_get_index(index)
                 .map(|(hk, c)| (std::str::from_utf8(&hk).unwrap().to_owned(), c))
         };
@@ -237,7 +239,7 @@ impl Counter {
 
     pub fn size(&self) -> usize {
         return unsafe {
-            (*self.inner.get()).size
+            (*self.inner.load(Ordering::Relaxed)).size
         };
     }
 }
