@@ -1,9 +1,10 @@
 #![feature(test)]
 extern crate test;
 
+use std::cell::UnsafeCell;
+use std::ptr;
 use std::sync::atomic;
 use std::sync::atomic::Ordering;
-use std::ptr;
 
 
 const KEY_SIZE: usize = 16;
@@ -26,14 +27,13 @@ struct HashSlot {
 struct InnerCounter {
     size: usize,
     used: atomic::AtomicUsize,
-    slots: Vec<HashSlot>,
+    slots: atomic::AtomicPtr<Vec<HashSlot>>,
 }
 
 /// The public Counter structure which contains the inner mutable state. This
 /// allows us to put this straight into an Arc and safely share between threads
 pub struct Counter {
-    inner: atomic::AtomicPtr<InnerCounter>,
-    prev: atomic::AtomicPtr<InnerCounter>,
+    inner: UnsafeCell<InnerCounter>
 }
 
 pub struct CounterIterator<'a> {
@@ -44,15 +44,14 @@ pub struct CounterIterator<'a> {
 
 
 /// An implementation of the djb2 hash using rust iterators over the contents
-/// of the HashKey array.
+/// of the `HashKey` array.
 pub fn djb2_hash(key: &HashKey) -> usize {
     key.into_iter().take_while(|c| { **c != 0 }).fold(DJB2_START, |hash, c| { (hash * 33) ^ (*c as usize) })
 }
 
 /// A small inlined helper function that checks if a given character is ascii
-#[inline(always)]
 fn is_ascii(c: &u8) -> bool {
-    return (*c > 47 && *c < 58) || (*c > 64 && *c < 91) || (*c > 96 && *c < 123);
+    (*c > 47 && *c < 58) || (*c > 64 && *c < 91) || (*c > 96 && *c < 123)
 }
 
 /// Clean a given key string. This involves stripping non ascii characters out
@@ -63,7 +62,7 @@ pub fn clean_key(key: &str) -> HashKey {
     for (index, v) in key.bytes().take(KEY_SIZE).filter(is_ascii).enumerate() {
         cleaned[index] = v;
     }
-    return cleaned;
+    cleaned
 }
 
 impl<'a> IntoIterator for &'a Counter {
@@ -113,17 +112,19 @@ impl InnerCounter {
         for _ in 0..INITIAL_SIZE {
             slots.push(HashSlot::new());
         }
+        let boxed = Box::new(slots);
         let counter: InnerCounter = InnerCounter {
             size: size,
             used: atomic::AtomicUsize::new(0),
-            slots: slots,
+            slots: atomic::AtomicPtr::new(Box::into_raw(boxed)),
         };
-        return counter;
+        counter
     }
 
     pub unsafe fn unsafe_get_index(&self, index: usize) -> Option<(HashKey, usize)> {
         if index > 0 && index < self.size {
-            let slot = &self.slots[index];
+            let slots = self.slots.load(Ordering::Relaxed);
+            let slot = &((*slots)[index]);
             let key = slot.key.load(Ordering::Relaxed);
             if key.is_null() {
                 return None;
@@ -133,17 +134,17 @@ impl InnerCounter {
                 ptr::copy(key, key_copy, 1);
                 return Some((*key_copy, value));
             }
-        } else {
-            return None;
         }
+        None
     }
 
     /// Unsafe method for returning the value of a counter.
     pub unsafe fn unsafe_get(&self, key: HashKey) -> usize {
         let size = self.size;
         let mut index = djb2_hash(&key) % size;
+        let slots = self.slots.load(Ordering::Relaxed);
         loop {
-            let slot = &self.slots[index];
+            let slot = &((*slots)[index]);
             let other_key = slot.key.load(Ordering::Relaxed);
             if other_key.is_null() {
                 return 0;
@@ -160,15 +161,16 @@ impl InnerCounter {
     pub unsafe fn unsafe_incr(&mut self, key: HashKey, count: usize) -> usize {
         let size = self.size;
         let mut index = djb2_hash(&key) % size;
+        let slots = self.slots.load(Ordering::Relaxed);
         let mut slot: &HashSlot;
         loop {
-            slot = &self.slots[index];
-            let other_key = slot.key.load(Ordering::Relaxed);
+            slot = &((*slots)[index]);
+            let other_key = slot.key.load(Ordering::Acquire);
             if other_key.is_null() {
                 let boxed_key = Box::new(key);
                 let res = slot.key.compare_exchange(other_key,
                                                     Box::into_raw(boxed_key),
-                                                    Ordering::Relaxed,
+                                                    Ordering::Release,
                                                     Ordering::Relaxed);
                 let ptr = res.unwrap_or_else(|v| { v });
                 if ptr.is_null() || *ptr == key {
@@ -181,7 +183,7 @@ impl InnerCounter {
             }
             index = (index + 1) % size
         }
-        return slot.count.fetch_add(count, Ordering::Relaxed);
+        slot.count.fetch_add(count, Ordering::Relaxed)
     }
 }
 
@@ -191,10 +193,16 @@ impl Drop for InnerCounter {
     /// first call to unsafe_incr() the key is copied into a Box so it will
     /// persist.
     fn drop(&mut self) {
-        for hs in &self.slots {
-            let key = hs.key.load(Ordering::Relaxed);
-            if !key.is_null() {
-                let _: Box<HashKey> = unsafe { Box::from_raw(key) };
+        unsafe {
+            let slots = self.slots.load(Ordering::Relaxed);
+            if !slots.is_null() {
+                for hs in &*slots {
+                    let key = hs.key.load(Ordering::Relaxed);
+                    if !key.is_null() {
+                        let _: Box<HashKey> = Box::from_raw(key);
+                    }
+                }
+                let _: Box<Vec<HashSlot>> = Box::from_raw(slots);
             }
         }
     }
@@ -203,44 +211,51 @@ impl Drop for InnerCounter {
 unsafe impl Sync for Counter {}
 unsafe impl Send for Counter {}
 
+impl Default for Counter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl Counter {
     /// Create a new counter, which is has an UnsafeCell wrapping the actual
     /// counter implementation.
     pub fn new() -> Counter {
         Counter {
-            inner: atomic::AtomicPtr::new(Box::into_raw(Box::new(InnerCounter::new(INITIAL_SIZE)))),
-            prev: atomic::AtomicPtr::new(ptr::null_mut()),
+            inner: UnsafeCell::new(InnerCounter::new(INITIAL_SIZE)),
         }
     }
 
     /// Extract the mutable reference to the counter implementation and
     /// increment the given key.
     pub fn incr(&self, key: &str, count: usize) -> usize {
-        return unsafe { 
-            (*self.inner.load(Ordering::Relaxed)).unsafe_incr(clean_key(key), count)
-        };
+        unsafe { 
+            (*self.inner.get()).unsafe_incr(clean_key(key), count)
+        }
     }
 
     /// Extract the mutable reference to the counter implementation and
     /// return the current counter value for the given key.
     pub fn get(&self, key: &str) -> usize {
-        return unsafe {
-            (*self.inner.load(Ordering::Relaxed)).unsafe_get(clean_key(key))
-        };
+        unsafe {
+            (*self.inner.get()).unsafe_get(clean_key(key))
+        }
     }
 
+    /// Return the `HashKey` as a `String` and the count as a usize for the given
+    /// index in the hashtable. NOTE: This breaks the abstraction of the hastable
+    /// and is only used internally by IntoIterator
     pub fn get_index(&self, index: usize) -> Option<(String, usize)> {
-        return unsafe {
-            (*self.inner.load(Ordering::Relaxed))
+        unsafe {
+            (*self.inner.get())
                 .unsafe_get_index(index)
                 .map(|(hk, c)| (std::str::from_utf8(&hk).unwrap().to_owned(), c))
-        };
+        }
     }
 
     pub fn size(&self) -> usize {
-        return unsafe {
-            (*self.inner.load(Ordering::Relaxed)).size
-        };
+        unsafe {
+            (*self.inner.get()).size
+        }
     }
 }
 
@@ -279,7 +294,8 @@ mod tests {
             counter.incr(&key, 1);
         }
         for (key, val) in (&counter).into_iter() {
-            println!("k: {}, v: {}", key, val)
+            println!("k: {}, v: {}", key, val);
+            assert_eq!(val, 1)
         }
     }
 
@@ -297,7 +313,7 @@ mod tests {
         for _ in 0..nthreads {
             let c = shared.clone();
             children.push(thread::spawn(move|| {
-                for (key, val) in (&c).into_iter() {
+                for (_, val) in (&c).into_iter() {
                     assert_eq!(val, 1);
                 }
             }));
@@ -315,7 +331,7 @@ mod tests {
         let c1 = shared.clone();
         children.push(thread::spawn(move|| {
             for _ in 0..200 {
-                for (key, val) in (&c1).into_iter() {
+                for (key, _) in (&c1).into_iter() {
                     assert_eq!(key, "key_1")
                 }
             }
@@ -438,7 +454,6 @@ mod tests {
         })
 
     }
-
 
     #[bench]
     fn bench_arc_incr(b: &mut Bencher) {
