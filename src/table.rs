@@ -11,10 +11,10 @@ use ::key::{HashKey, djb2_hash, hashkey_to_string};
 
 
 #[derive(Default)]
-struct Slot {
-    state: AtomicState<SlotState>,
-    key: atomic::AtomicPtr<HashKey>,
-    value: atomic::AtomicUsize,
+pub struct Slot {
+    pub state: AtomicState<SlotState>,
+    pub key: atomic::AtomicPtr<HashKey>,
+    pub value: atomic::AtomicUsize,
 }
 
 impl Drop for Slot {
@@ -30,6 +30,7 @@ impl Drop for Slot {
 pub struct VectorTable {
     slots: Vec<Slot>,
     used: atomic::AtomicUsize,
+    active_threads: atomic::AtomicUsize,
 }
 
 impl VectorTable {
@@ -41,7 +42,20 @@ impl VectorTable {
         VectorTable{
             slots: slots,
             used: atomic::AtomicUsize::new(0),
+            active_threads: atomic::AtomicUsize::new(0),
         }
+    }
+
+    pub fn add_thread(&self) {
+        self.active_threads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn remove_thread(&self) {
+        self.active_threads.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn active_threads(&self) -> usize {
+        self.active_threads.load(Ordering::Relaxed)
     }
 
     pub fn used(&self) -> usize {
@@ -70,12 +84,14 @@ impl VectorTable {
         return Some(index)
     }
 
-    fn get_index(&self, index: usize) -> Option<&Slot> {
-        self.slots.get(index)
+    pub fn get_index(&self, index: usize) -> Option<&Slot> {
+        let ret = self.slots.get(index);
+        ret
     }
 
     fn get_slot(&self, key: HashKey) -> Option<&Slot> {
-        self.find_index(key).and_then(|i|{self.get_index(i)})
+        let ret = self.find_index(key).and_then(|i|{self.get_index(i)});
+        ret
     }
 
     pub fn get(&self, key: HashKey) -> Option<usize> {
@@ -86,7 +102,8 @@ impl VectorTable {
             let slot = self.slots.get(index).unwrap();
             let slot_key = slot.key.load(Ordering::Relaxed);
             if !slot_key.is_null() && unsafe { *slot_key == key }{
-                return Some(slot.value.load(Ordering::Relaxed))
+                let ret = Some(slot.value.load(Ordering::Relaxed));
+                return ret
             }
             index = (index + 1) % size;
             if index == hash {
@@ -123,13 +140,15 @@ impl VectorTable {
                             }
                             self.used.fetch_add(1, Ordering::Relaxed);
                             slot.state.set(SlotState::Alive);
-                            return slot.value.fetch_add(val, Ordering::Relaxed);
+                            let ret = slot.value.fetch_add(val, Ordering::Relaxed);
+                            return ret
                         }
                     },
                     SlotState::Alive => {
                         let slot_key = slot.key.load(Ordering::Relaxed);
                         if unsafe{ *slot_key == key }{
-                            return slot.value.fetch_add(val, Ordering::Relaxed);
+                            let ret = slot.value.fetch_add(val, Ordering::Relaxed);
+                            return ret
                         }
                     },
                     SlotState::Allocating => {},
@@ -142,7 +161,7 @@ impl VectorTable {
     }
 
     pub fn copy_index_to(&self, index: usize, table: &VectorTable) -> bool {
-        match self.slots.get(index) {
+        let ret = match self.slots.get(index) {
             Some(slot) => match slot.state.get() {
                 SlotState::Dead => false,
                 SlotState::Allocating => panic!("Tried to copy a slot in state Allocating"),
@@ -166,11 +185,13 @@ impl VectorTable {
                 SlotState::Copied => false,
             },
             None => false,
-        }
+        };
+        return ret
+
     }
 
     pub fn copy_key_to(&self, key: HashKey, table: &VectorTable) -> bool {
-        match self.get_slot(key) {
+        let ret = match self.get_slot(key) {
             Some(slot) => match slot.state.get() {
                 SlotState::Dead => false,
                 SlotState::Allocating => panic!("Tried to copy a slot in state Allocating"),
@@ -195,7 +216,8 @@ impl VectorTable {
                 SlotState::Copied => false,
             },
             None => false,
-        }
+        };
+        return ret
     }
 }
 

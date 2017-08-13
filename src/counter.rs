@@ -4,8 +4,10 @@ use std::sync::atomic;
 use std::sync::atomic::Ordering;
 
 use ::key::{clean_key, HashKey};
+use ::iter::CounterIter;
 use ::state::{AtomicState, ResizeState};
 use ::table::VectorTable;
+
 
 const INITIAL_SIZE: usize = 128;
 const MAX_LOAD_FACTOR: f64 = 0.70;
@@ -19,6 +21,22 @@ struct Counter{
     previous: atomic::AtomicPtr<VectorTable>,
     copied: atomic::AtomicUsize,
     active_writers: atomic::AtomicUsize,
+}
+
+impl<'a> IntoIterator for &'a Counter {
+    type Item = (String, usize);
+    type IntoIter = CounterIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let current = self.current.load(Ordering::Acquire);
+        unsafe {
+            (*current).add_thread();
+            CounterIter{
+                slots: &(*current),
+                index: 0,
+            }
+        }
+    }
 }
 
 impl Counter {
@@ -115,13 +133,15 @@ impl Counter {
     }
 
     fn deallocate_old_table(&self) {
-        let res = self.state.set_cas(ResizeState::Copying, ResizeState::Deallocating);
-        if res {
-            let table = self.previous.load(Ordering::Acquire);
-            let _: Box<VectorTable> = unsafe { Box::from_raw(table) };
-            self.previous.store(ptr::null_mut(), Ordering::Release);
-            self.copied.store(0, Ordering::Relaxed);
-            self.state.set(ResizeState::Complete);
+        let table = self.previous.load(Ordering::Acquire);
+        if unsafe {(*table).active_threads() == 0} {
+            let res = self.state.set_cas(ResizeState::Copying, ResizeState::Deallocating);
+            if res {
+                let _: Box<VectorTable> = unsafe { Box::from_raw(table) };
+                self.previous.store(ptr::null_mut(), Ordering::Release);
+                self.copied.store(0, Ordering::Relaxed);
+                self.state.set(ResizeState::Complete);
+            }
         }
     }
 
@@ -257,6 +277,43 @@ mod tests {
             let _ = t.join();
         }
         assert_eq!(shared.get("foo").unwrap(), nincr * nthreads);
+    }
+
+    #[test]
+    fn sequential_iter() {
+        let counter = Counter::new();
+        for i in 0..20 {
+            let key = format!("key_{0}", i);
+            counter.incr(&key, 1);
+        }
+        for (key, val) in (&counter).into_iter() {
+            println!("k: {}, v: {}", key, val);
+            assert_eq!(val, 1)
+        }
+    }
+
+    #[test]
+    fn concurrent_iter() {
+        let counter = Counter::new();
+        let shared = Arc::new(counter);
+        let nthreads = 8;
+        let c = shared.clone();
+        for i in 0..20 {
+            let key = format!("key_{0}", i);
+            c.incr(&key, 1);
+        }
+        let mut children = vec![];
+        for _ in 0..nthreads {
+            let c = shared.clone();
+            children.push(thread::spawn(move|| {
+                for (_, val) in (&c).into_iter() {
+                    assert_eq!(val, 1);
+                }
+            }));
+        }
+        for t in children {
+            let _ = t.join();
+        }
     }
 
     #[test]
