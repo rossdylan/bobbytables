@@ -317,6 +317,31 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_iter_and_incr() {
+        let counter = Counter::new();
+        let shared = Arc::new(counter);
+        let mut children = vec![];
+        let c1 = shared.clone();
+        children.push(thread::spawn(move|| {
+            for _ in 0..200 {
+                for (key, _) in (&c1).into_iter() {
+                    assert_eq!(key, "key_1")
+                }
+            }
+        }));
+        let c2 = shared.clone();
+        children.push(thread::spawn(move|| {
+            for _ in 0..10000 {
+                c2.incr("key_1", 1);
+            }
+        }));
+
+        for t in children {
+            let _ = t.join();
+        }
+    }
+
+    #[test]
     fn resize() {
         let counter = Counter::new();
         for i in 0..200 {
