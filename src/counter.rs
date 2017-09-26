@@ -235,11 +235,12 @@ impl Counter {
 #[cfg(test)]
 mod tests {
     use std::thread;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
     use test::Bencher;
     use rand;
     use rand::Rng;
     use super::*;
+    use std::collections::HashMap;
 
 
     #[test]
@@ -511,5 +512,63 @@ mod tests {
         let clone = shared.clone();
         clone.incr("foo", 1);
         b.iter(|| clone.get("foo"))
+    }
+
+    #[bench]
+    fn bench_hashmap_get(b: &mut Bencher) {
+        let mut counter = HashMap::new();
+        counter.insert("foobar", 0);
+        b.iter(|| {
+            counter.get("foobar");
+        });
+
+    }
+    #[bench]
+    fn bench_hashmap_incr(b: &mut Bencher) {
+        let mut counter = HashMap::new();
+        counter.insert("foobar", 0);
+        b.iter(|| {
+            let new: usize;
+            {
+                let prev = counter.get_mut("foobar").unwrap();
+                new = (*prev) + 1;
+            }
+            counter.insert("foobar", new);
+        });
+    }
+
+    #[bench]
+    fn bench_concurrent_hashmap_get(b: &mut Bencher) {
+        let counter = Arc::new(RwLock::new(HashMap::new()));
+        let clone = counter.clone();
+        {
+            clone.write().unwrap().insert("foobar", 0);
+        }
+        b.iter(|| {
+            {
+                let locked_counter = clone.read().unwrap();
+                locked_counter.get("foobar").unwrap();
+            }
+        });
+    }
+
+    #[bench]
+    fn bench_concurrent_hashmap_incr(b: &mut Bencher) {
+        let counter = Arc::new(RwLock::new(HashMap::new()));
+        let clone = counter.clone();
+        {
+            clone.write().unwrap().insert("foobar", 0);
+        }
+        b.iter(|| {
+            {
+                let new: usize;
+                let mut locked_counter = clone.write().unwrap();
+                {
+                    let prev = locked_counter.get_mut("foobar").unwrap();
+                    new = (*prev) + 1;
+                }
+                locked_counter.insert("foobar", new);
+            }
+        });
     }
 }
