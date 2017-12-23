@@ -76,10 +76,10 @@ impl From<ResizeState> for usize {
     }
 }
 
-/// The SlotState enum is used to track the current status of a slot during the resize operation.
+/// The `SlotState` enum is used to track the current status of a slot during the resize operation.
 /// 1. Slots are created in `SlotState::Alive` and spend most of their life here
-/// 2. During a call to resize_copy a thread will attempt to CAS the state to `SlotState::Copying`. This locks
-///    the slot and prevents other threads from moving it, but allows calls to unsafe_get to still
+/// 2. During a call to `resize_copy` a thread will attempt to CAS the state to `SlotState::Copying`. This locks
+///    the slot and prevents other threads from moving it, but allows calls to `unsafe_get` to still
 ///    use the value in this slot.
 /// 3. After the slot has been copied into the main slots vector the state moves to
 ///    `SlotState::Dead` to indicate this slot can be ignored.
@@ -128,10 +128,10 @@ impl From<SlotState> for usize {
 }
 
 
-/// AtomicState is a struct and impl that handles all the conversions and error
-/// checking for driving a state-machine via an internal AtomicUsize. It is generic
-/// across enums that implement Default, PartialEq, Copy, and TryFrom<usize>.
-/// an usize impl for From<insert enum here> is also required.
+/// `AtomicState` is a struct and impl that handles all the conversions and error
+/// checking for driving a state-machine via an internal `AtomicUsize`. It is generic
+/// across enums that implement `Default`, `PartialEq`, `Copy`, and `TryFrom`<usize>.
+/// an usize impl for `From`<insert enum here> is also required.
 pub struct AtomicState<E: TryFrom<usize> + Default + PartialEq + Copy> {
     state: atomic::AtomicUsize,
     state_type: PhantomData<E>,
@@ -188,7 +188,7 @@ impl<E: TryFrom<usize> + Default + PartialEq + Copy> Default for AtomicState<E> 
     <E as TryFrom<usize>>::Error: fmt::Display {
 
     fn default() -> Self {
-        return Self::new()
+        Self::new()
     }
 }
 

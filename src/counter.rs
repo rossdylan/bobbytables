@@ -21,6 +21,7 @@ struct Counter{
     previous: atomic::AtomicPtr<VectorTable>,
     copied: atomic::AtomicUsize,
     active_writers: atomic::AtomicUsize,
+    active_copiers: atomic::AtomicUsize,
 }
 
 impl<'a> IntoIterator for &'a Counter {
@@ -48,6 +49,7 @@ impl Counter {
             previous: atomic::AtomicPtr::default(),
             copied: atomic::AtomicUsize::new(0),
             active_writers: atomic::AtomicUsize::new(0),
+            active_copiers: atomic::AtomicUsize::new(0),
         }
     }
 
@@ -88,7 +90,7 @@ impl Counter {
             self.state.set(ResizeState::Copying);
             return true
         }
-        return false
+        false
     }
 
     /// Attempt to copy a single slot based on the given key to the new table.
@@ -137,6 +139,9 @@ impl Counter {
         if unsafe {(*table).active_threads() == 0} {
             let res = self.state.set_cas(ResizeState::Copying, ResizeState::Deallocating);
             if res {
+                // If we acquire the critical section spin while we drain copiers
+                while self.active_copiers.load(Ordering::Relaxed) > 0 {}
+
                 let _: Box<VectorTable> = unsafe { Box::from_raw(table) };
                 self.previous.store(ptr::null_mut(), Ordering::Release);
                 self.copied.store(0, Ordering::Relaxed);
@@ -173,28 +178,28 @@ impl Counter {
                             }
                         }
                     }
-                    self.copy_current_key(key);
-                    self.copy_some_slots();
                     if self.resize_finished() {
                         self.deallocate_old_table();
+                    } else {
+                        self.active_copiers.fetch_add(1, Ordering::Relaxed);
+                        self.copy_current_key(key);
+                        self.copy_some_slots();
+                        self.active_copiers.fetch_sub(1, Ordering::Relaxed);
                     }
                 }
             },
-            ResizeState::Allocating => loop {
-                match self.state.get() {
-                    ResizeState::Allocating => continue,
-                    _ => break,
-                }
-            },
+            ResizeState::Allocating => while let ResizeState::Allocating = self.state.get() {},
             ResizeState::Copying => { // perform actual copying logic and check if we can deallocate
-                self.copy_current_key(key);
-                self.copy_some_slots();
                 if self.resize_finished() {
                     self.deallocate_old_table();
+                } else {
+                    self.active_copiers.fetch_add(1, Ordering::Relaxed);
+                    self.copy_current_key(key);
+                    self.copy_some_slots();
+                    self.active_copiers.fetch_sub(1, Ordering::Relaxed);
                 }
-                return
             },
-            ResizeState::Deallocating => return, //no-op all operatations go to the current table
+            ResizeState::Deallocating => while let ResizeState::Deallocating = self.state.get() {}, // Block until complete.
         }
     }
 
@@ -211,9 +216,10 @@ impl Counter {
     pub fn get(&self, key: &str) -> Option<usize> {
         let hk = clean_key(key);
         let table = self.current.load(Ordering::Acquire);
-        match self.state.get() {
-            ResizeState::Copying => self.copy_current_key(hk),
-            _ => {},
+        if let ResizeState::Copying = self.state.get() {
+            self.active_copiers.fetch_add(1, Ordering::Relaxed);
+            self.copy_current_key(hk);
+            self.active_copiers.fetch_sub(1, Ordering::Relaxed);
         }
         unsafe{ (*table).get(hk) }
     }
@@ -279,11 +285,11 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("counter-ci".to_string()).spawn(move|| {
                 for _ in 0..nincr {
                     c.incr("foo", 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -317,11 +323,11 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("counter-citer".to_string()).spawn(move|| {
                 for (_, val) in (&c).into_iter() {
                     assert_eq!(val, 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -334,19 +340,19 @@ mod tests {
         let shared = Arc::new(counter);
         let mut children = vec![];
         let c1 = shared.clone();
-        children.push(thread::spawn(move|| {
+        children.push(thread::Builder::new().name("counter-citer-incr".to_string()).spawn(move|| {
             for _ in 0..200 {
                 for (key, _) in (&c1).into_iter() {
                     assert_eq!(key, "key_1")
                 }
             }
-        }));
+        }).unwrap());
         let c2 = shared.clone();
-        children.push(thread::spawn(move|| {
+        children.push(thread::Builder::new().name("counter-citer-incr".to_string()).spawn(move|| {
             for _ in 0..10000 {
                 c2.incr("key_1", 1);
             }
-        }));
+        }).unwrap());
 
         for t in children {
             let _ = t.join();
@@ -375,12 +381,12 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("counter-cr".to_string()).spawn(move|| {
                 for i in 0..90 {
                     let key = format!("foo{}", i);
                     c.incr(&key, 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -400,7 +406,7 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("counter-hcr".to_string()).spawn(move|| {
                 let mut rng = rand::thread_rng();
                 let mut keys: Vec<usize> = (0..nkeys).collect();
                 rng.shuffle(keys.as_mut_slice());
@@ -408,7 +414,7 @@ mod tests {
                     let key = format!("foo{}", i);
                     c.incr(&key, 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -442,11 +448,11 @@ mod tests {
         for i in 0..nthreads {
             let c = shared.clone();
             let key = format!("thread_{}", i);
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("counter-cmki".to_string()).spawn(move|| {
                 for _ in 0..nincr {
                     c.incr(&key, 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();

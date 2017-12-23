@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use ::state::{AtomicState, SlotState};
 use ::key::{HashKey, djb2_hash, hashkey_to_string};
 
-/// IncrResult is used to tell the caller if we need to retry the incr. This 
+/// `IncrResult` is used to tell the caller if we need to retry the incr. This 
 /// should only happen if a resize begins in the middle of an increment
 /// operation.
 pub enum IncrResult {
@@ -79,7 +79,7 @@ impl VectorTable {
         let hash = djb2_hash(&key) % size;
         let mut index = hash;
         loop {
-            let slot = self.slots.get(index).unwrap();
+            let slot = &self.slots[index];
             let slot_key = slot.key.load(Ordering::Relaxed);
             if slot_key.is_null() || unsafe { *slot_key == key }{
                 break
@@ -89,17 +89,15 @@ impl VectorTable {
                 return None;
             }
         }
-        return Some(index)
+        Some(index)
     }
 
     pub fn get_index(&self, index: usize) -> Option<&Slot> {
-        let ret = self.slots.get(index);
-        ret
+        self.slots.get(index)
     }
 
     fn get_slot(&self, key: HashKey) -> Option<&Slot> {
-        let ret = self.find_index(key).and_then(|i|{self.get_index(i)});
-        ret
+        self.find_index(key).and_then(|i|{self.get_index(i)})
     }
 
     pub fn get(&self, key: HashKey) -> Option<usize> {
@@ -107,7 +105,7 @@ impl VectorTable {
         let hash = djb2_hash(&key) % size;
         let mut index = hash;
         loop {
-            let slot = self.slots.get(index).unwrap();
+            let slot = &self.slots[index];
             let slot_key = slot.key.load(Ordering::Relaxed);
             if !slot_key.is_null() && unsafe { *slot_key == key }{
                 let ret = Some(slot.value.load(Ordering::Relaxed));
@@ -161,8 +159,7 @@ impl VectorTable {
                         }
                     },
                     SlotState::Allocating => {},
-                    SlotState::Copying => return IncrResult::Outdated,
-                    SlotState::Copied => return IncrResult::Outdated,
+                    SlotState::Copying | SlotState::Copied => return IncrResult::Outdated,
                 },
                 None => panic!("VectorTable is out of space"),
             }
@@ -170,9 +167,9 @@ impl VectorTable {
     }
 
     pub fn copy_index_to(&self, index: usize, table: &VectorTable) -> bool {
-        let ret = match self.slots.get(index) {
+        match self.slots.get(index) {
             Some(slot) => match slot.state.get() {
-                SlotState::Dead => false,
+                SlotState::Dead | SlotState::Copying | SlotState::Copied => false,
                 SlotState::Allocating => panic!("Tried to copy a slot in state Allocating"),
                 SlotState::Alive => {
                     let acquired = slot.state.set_cas(SlotState::Alive, SlotState::Copying);
@@ -182,7 +179,9 @@ impl VectorTable {
                             panic!("Slot in Alive state has null key");
                         }
                         unsafe {
-                            table.incr(*slot_key, slot.value.load(Ordering::Relaxed));
+                            if let IncrResult::Outdated = table.incr(*slot_key, slot.value.load(Ordering::Relaxed)) {
+                                panic!("copy_index_to destination contains outdated data");
+                            }
                         }
                         slot.state.set(SlotState::Copied);
                         true
@@ -190,19 +189,15 @@ impl VectorTable {
                         false
                     }
                 },
-                SlotState::Copying => false,
-                SlotState::Copied => false,
             },
             None => false,
-        };
-        return ret
-
+        }
     }
 
     pub fn copy_key_to(&self, key: HashKey, table: &VectorTable) -> bool {
-        let ret = match self.get_slot(key) {
+        match self.get_slot(key) {
             Some(slot) => match slot.state.get() {
-                SlotState::Dead => false,
+                SlotState::Dead | SlotState::Copying | SlotState::Copied => false,
                 SlotState::Allocating => panic!("Tried to copy a slot in state Allocating"),
                 SlotState::Alive => {
                     let acquired = slot.state.set_cas(SlotState::Alive, SlotState::Copying);
@@ -214,19 +209,18 @@ impl VectorTable {
                         if unsafe{ *slot_key != key } {
                             panic!("Slot found doesn't have correct key");
                         }
-                        table.incr(key, slot.value.load(Ordering::Relaxed));
+                        if let IncrResult::Outdated = table.incr(key, slot.value.load(Ordering::Relaxed)) {
+                            panic!("The table we are copying to is outdated");
+                        }
                         slot.state.set(SlotState::Copied);
                         true
                     } else {
                         false
                     }
                 },
-                SlotState::Copying => false,
-                SlotState::Copied => false,
             },
             None => false,
-        };
-        return ret
+        }
     }
 }
 
@@ -280,7 +274,7 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("table-cmki".to_string()).spawn(move|| {
                 let mut rng = rand::thread_rng();
                 for _ in 0..nincr {
                     let mut keys: Vec<usize> = (0..nkeys).collect();
@@ -289,7 +283,7 @@ mod tests {
                         c.incr(clean_key(&format!("foo_{}", i)), 1);
                     }
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -312,11 +306,11 @@ mod tests {
         let mut children = vec![];
         for _ in 0..nthreads {
             let c = shared.clone();
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("table-ci".to_string()).spawn(move|| {
                 for _ in 0..nincr {
                     c.incr(clean_key("foo"), 1);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();
@@ -387,14 +381,14 @@ mod tests {
             let c = shared.clone();
             let nc = new_shared.clone();
 
-            children.push(thread::spawn(move|| {
+            children.push(thread::Builder::new().name("table-cck".to_string()).spawn(move|| {
                 let mut rng = rand::thread_rng();
                 let mut keys: Vec<usize> = (0..INITIAL_SIZE).collect();
                 rng.shuffle(keys.as_mut_slice());
                 for k in keys {
                     c.copy_key_to(clean_key(&format!("foobar_{}", k)), &nc);
                 }
-            }));
+            }).unwrap());
         }
         for t in children {
             let _ = t.join();

@@ -1,5 +1,3 @@
-use std::ascii::AsciiExt;
-
 const KEY_SIZE: usize = 16;
 const DJB2_START: usize = 5318;
 
@@ -27,7 +25,7 @@ pub fn hashkey_to_string(key: &HashKey) -> String {
     for c in key.into_iter().take_while(|c| { **c != 0 }){
         nk.push(*c as char);
     }
-    return nk;
+    nk
 }
 
 
