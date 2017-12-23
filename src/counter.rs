@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use ::key::{clean_key, HashKey};
 use ::iter::CounterIter;
 use ::state::{AtomicState, ResizeState};
-use ::table::VectorTable;
+use ::table::{VectorTable, IncrResult};
 
 
 const INITIAL_SIZE: usize = 128;
@@ -222,13 +222,24 @@ impl Counter {
         let hk = clean_key(key);
         self.drive_resize(hk);
         self.active_writers.fetch_add(1, Ordering::Relaxed);
-        let table = self.current.load(Ordering::Acquire);
-        unsafe {
-            let val = (*table).incr(hk, val);
-            self.active_writers.fetch_sub(1, Ordering::Relaxed);
-            val
+        let mut table = self.current.load(Ordering::Acquire);
+        let mut ret: usize = 0;
+        let mut cont: bool = true;
+        while cont {
+            let res = unsafe { (*table).incr(hk, val) };
+            cont = match res {
+                IncrResult::Outdated => {
+                    table = self.current.load(Ordering::Acquire);
+                    true
+                },
+                IncrResult::Current(v) => {
+                    ret = v;
+                    false
+                }
+            }
         }
-
+        self.active_writers.fetch_sub(1, Ordering::Relaxed);
+        ret
     }
 }
 

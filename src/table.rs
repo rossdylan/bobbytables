@@ -9,6 +9,14 @@ use std::sync::atomic::Ordering;
 use ::state::{AtomicState, SlotState};
 use ::key::{HashKey, djb2_hash, hashkey_to_string};
 
+/// IncrResult is used to tell the caller if we need to retry the incr. This 
+/// should only happen if a resize begins in the middle of an increment
+/// operation.
+pub enum IncrResult {
+    Current(usize),
+    Outdated,
+}
+
 
 #[derive(Default)]
 pub struct Slot {
@@ -118,8 +126,9 @@ impl VectorTable {
     /// the slot. First we attempt to CAS the state from `SlotState::Dead` to
     /// `SlotState::Allocating`. This gives us exclusive access to it until we
     /// finish allocating the key. The transition to `SlotState::Alive` releases
-    /// that "lock" and we increment the value as normal.
-    pub fn incr(&self, key: HashKey, val: usize) -> usize {
+    /// that "lock" and we increment the value as normal. If a slot was copied
+    /// out from under us, we return an error
+    pub fn incr(&self, key: HashKey, val: usize) -> IncrResult {
         loop {
             match self.get_slot(key) {
                 Some(slot) => match slot.state.get() {
@@ -141,19 +150,19 @@ impl VectorTable {
                             self.used.fetch_add(1, Ordering::Relaxed);
                             slot.state.set(SlotState::Alive);
                             let ret = slot.value.fetch_add(val, Ordering::Relaxed);
-                            return ret
+                            return IncrResult::Current(ret)
                         }
                     },
                     SlotState::Alive => {
                         let slot_key = slot.key.load(Ordering::Relaxed);
                         if unsafe{ *slot_key == key }{
                             let ret = slot.value.fetch_add(val, Ordering::Relaxed);
-                            return ret
+                            return IncrResult::Current(ret)
                         }
                     },
                     SlotState::Allocating => {},
-                    SlotState::Copying => panic!("Tried to incr key in Copying state"),
-                    SlotState::Copied => panic!("WTF This slot was copied, how did you get here"),
+                    SlotState::Copying => return IncrResult::Outdated,
+                    SlotState::Copied => return IncrResult::Outdated,
                 },
                 None => panic!("VectorTable is out of space"),
             }
@@ -237,7 +246,10 @@ mod tests {
     #[test]
     fn increment() {
         let table = VectorTable::new(INITIAL_SIZE);
-        let res = table.incr(clean_key("foo"), 1);
+        let res = match table.incr(clean_key("foo"), 1) {
+            IncrResult::Current(v) => v,
+            IncrResult::Outdated => panic!("Increment test returned Outdated"),
+        };
         assert_eq!(res, 0);
         let slot = table.get_slot(clean_key("foo")).unwrap();
         assert_eq!(slot.value.load(Ordering::Relaxed), 1);
